@@ -65,6 +65,7 @@
     let recipes = [];
     let tiktoks = [];
     let mealPlan = {};
+    let weekOffset = 0; // 0 = aktuelle Woche, -1 = letzte Woche, usw.
     const DAYS = ['Mo','Di','Mi','Do','Fr','Sa','So'];
     const DAYFULL = ['Montag','Dienstag','Mittwoch','Donnerstag','Freitag','Samstag','Sonntag'];
     const CAT_LIST = Object.keys(KEYWORD_CATS).concat(['❓ Sonstiges']);
@@ -72,16 +73,19 @@
     // ─────────────────────────────────────────────────
     // WEEK DATES
     // ─────────────────────────────────────────────────
-    function getWeekDates() {
+    function getWeekDates(offset = 0) {
       const today = new Date();
       const dow = today.getDay();
       const monday = new Date(today);
-      monday.setDate(today.getDate() - (dow === 0 ? 6 : dow - 1));
+      monday.setDate(today.getDate() - (dow === 0 ? 6 : dow - 1) + offset * 7);
       return DAYS.map((_, i) => {
         const d = new Date(monday);
         d.setDate(monday.getDate() + i);
         return d;
       });
+    }
+    function dateKey(d) {
+      return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
     }
     function fmtDate(d) {
       return `${d.getDate()}.${d.getMonth()+1}.`;
@@ -89,6 +93,18 @@
     function isToday(d) {
       const t = new Date();
       return d.getDate()===t.getDate() && d.getMonth()===t.getMonth() && d.getFullYear()===t.getFullYear();
+    }
+    function getWeekLabel(offset) {
+      const dates = getWeekDates(offset);
+      const mo = dates[0]; const so = dates[6];
+      // ISO KW
+      const tmp = new Date(mo); tmp.setHours(0,0,0,0);
+      tmp.setDate(tmp.getDate() + 3 - ((tmp.getDay()+6)%7));
+      const kw = Math.round((tmp - new Date(tmp.getFullYear(),0,4)) / 604800000) + 1;
+      if (offset === 0) return `KW ${kw} · Diese Woche`;
+      if (offset === -1) return `KW ${kw} · Letzte Woche`;
+      if (offset === 1) return `KW ${kw} · Nächste Woche`;
+      return `KW ${kw} · ${fmtDate(mo)} – ${fmtDate(so)}`;
     }
 
     // ─────────────────────────────────────────────────
@@ -157,6 +173,11 @@
       const checked = shoppingItems.filter(i=>i.checked);
       for (const item of checked) await deleteShoppingItem(item.id);
     }
+    async function clearAllItems() {
+      if (shoppingItems.length === 0) return;
+      if (!confirm(`Wirklich alle ${shoppingItems.length} Artikel löschen?`)) return;
+      for (const item of [...shoppingItems]) await deleteShoppingItem(item.id);
+    }
 
     // ─────────────────────────────────────────────────
     // RECIPE ACTIONS
@@ -187,11 +208,30 @@
     // ─────────────────────────────────────────────────
     // MEAL PLAN ACTIONS
     // ─────────────────────────────────────────────────
-    async function setMeal(day, slot, value) {
-      if (!mealPlan[day]) mealPlan[day]={};
-      mealPlan[day][slot]=value;
+    async function setMeal(dayKey, slot, value) {
+      if (!mealPlan[dayKey]) mealPlan[dayKey]={};
+      mealPlan[dayKey][slot]=value;
       if (firebaseReady) await setDoc(doc(db,'config','mealplan'), mealPlan);
       else { saveLocal('mealplan',mealPlan); }
+    }
+
+    // ─────────────────────────────────────────────────
+    // TIKTOK: AUTO-FETCH BESCHREIBUNG
+    // ─────────────────────────────────────────────────
+    async function fetchTikTokInfo(url) {
+      const oembedUrl = `https://www.tiktok.com/oembed?url=${encodeURIComponent(url)}`;
+      // Versuch 1: direkt (funktioniert manchmal)
+      try {
+        const r = await fetch(oembedUrl);
+        if (r.ok) { const d = await r.json(); return { title: d.title||'', author: d.author_name||'' }; }
+      } catch(e) {}
+      // Versuch 2: über CORS-Proxy
+      try {
+        const proxy = `https://api.allorigins.win/get?url=${encodeURIComponent(oembedUrl)}`;
+        const r = await fetch(proxy);
+        if (r.ok) { const d = await r.json(); const j = JSON.parse(d.contents); return { title: j.title||'', author: j.author_name||'' }; }
+      } catch(e) {}
+      return null;
     }
 
     // ─────────────────────────────────────────────────
@@ -222,8 +262,8 @@
       return r ? r.ingredients : '';
     }
 
-    window.addMealToShopping = function(day, slot) {
-      const mealText = mealPlan[day]?.[slot] || '';
+    window.addMealToShopping = function(dk, slot) {
+      const mealText = mealPlan[dk]?.[slot] || '';
       const slotLabels = {breakfast:'Frühstück', lunch:'Mittagessen', dinner:'Abendessen'};
       const title = `Zutaten für ${mealText || slotLabels[slot]} → Einkaufsliste`;
       const prefill = getRecipeIngredients(mealText);
@@ -262,6 +302,7 @@
             ${CAT_LIST.map(c=>`<option value="${c}">${c}</option>`).join('')}
           </select>
           <div id="si-hint" class="cat-hint"></div>
+          ${shoppingItems.length > 0 ? `<button class="btn btn-danger full" onclick="window.clearAll()">🗑️ Gesamte Liste löschen</button>` : ''}
         </div>`;
 
       if (shoppingItems.length===0) {
@@ -354,9 +395,12 @@
       if (!cont) return;
       let html = `
         <div class="add-form card">
-          <input id="tt-url" class="inp" placeholder="TikTok-Link einfügen…" type="url">
-          <input id="tt-title" class="inp" placeholder="Rezeptname / Beschreibung *" type="text">
-          <textarea id="tt-ingredients" class="inp" placeholder="Zutaten (eine pro Zeile, optional)&#10;z.B. 200g Hähnchenbrust&#10;1 Zwiebel&#10;2 Knoblauchzehen" rows="4"></textarea>
+          <input id="tt-url" class="inp" placeholder="TikTok-Link einfügen…" type="url"
+            onpaste="window.onTikTokPaste(event)"
+            onblur="window.onTikTokBlur(this.value)">
+          <div id="tt-fetch-status" class="fetch-status"></div>
+          <input id="tt-title" class="inp" placeholder="Rezeptname (wird automatisch geladen)" type="text">
+          <textarea id="tt-ingredients" class="inp" placeholder="Videobeschreibung / Zutaten&#10;(wird automatisch geladen, wenn verfügbar)" rows="4"></textarea>
           <input id="tt-notes" class="inp" placeholder="Notizen (optional)" type="text">
           <button class="btn btn-primary full" onclick="window.addTikTokUI()">💾 Speichern</button>
         </div>`;
@@ -392,15 +436,27 @@
     function renderMeals() {
       const cont = document.getElementById('tab-meals');
       if (!cont) return;
-      const weekDates = getWeekDates();
+      const weekDates = getWeekDates(weekOffset);
       const slots = [
         ['🌅 Frühstück','breakfast'],
         ['☀️ Mittagessen','lunch'],
         ['🌙 Abendessen','dinner']
       ];
-      let html = `<div class="meals-grid">`;
+      // Week navigation bar
+      let html = `
+        <div class="week-nav card">
+          <button class="week-nav-btn" onclick="window.prevWeek()">‹</button>
+          <div class="week-nav-label">
+            <span class="week-label">${getWeekLabel(weekOffset)}</span>
+            <span class="week-range">${fmtDate(weekDates[0])} – ${fmtDate(weekDates[6])}</span>
+          </div>
+          <button class="week-nav-btn" onclick="window.nextWeek()">›</button>
+        </div>
+        ${weekOffset !== 0 ? `<button class="btn btn-ghost full mb-sm" onclick="window.goToCurrentWeek()">↩ Zurück zur aktuellen Woche</button>` : ''}
+        <div class="meals-grid">`;
       DAYS.forEach((day, i) => {
         const d = weekDates[i];
+        const dk = dateKey(d);
         const today = isToday(d);
         html += `<div class="day-card card${today?' today-card':''}">
           <div class="day-header">
@@ -411,16 +467,16 @@
             </div>
           </div>`;
         for (const [label, slot] of slots) {
-          const val = mealPlan[day]?.[slot] || '';
+          const val = mealPlan[dk]?.[slot] || '';
           const hasRecipe = recipes.some(r=>r.name.toLowerCase()===val.toLowerCase().trim());
           html += `<div class="meal-slot">
             <div class="meal-label-row">
               <span class="meal-label">${label}</span>
-              <button class="meal-cart-btn" title="Zutaten zur Einkaufsliste" onclick="window.addMealToShopping('${day}','${slot}')">🛒</button>
+              <button class="meal-cart-btn" title="Zutaten zur Einkaufsliste" onclick="window.addMealToShopping('${dk}','${slot}')">🛒</button>
             </div>
             <input class="inp meal-inp${hasRecipe?' has-recipe':''}" value="${esc(val)}" placeholder="Was essen?"
-              onblur="window.updateMeal('${day}','${slot}',this.value)"
-              oninput="window.onMealInput(this,'${day}','${slot}')"
+              onblur="window.updateMeal('${dk}','${slot}',this.value)"
+              oninput="window.onMealInput(this,'${dk}','${slot}')"
               onkeydown="if(event.key==='Enter')this.blur()">
             ${hasRecipe?`<div class="recipe-link-hint">📖 Rezept vorhanden</div>`:''}
           </div>`;
@@ -431,7 +487,7 @@
       cont.innerHTML = html;
     }
 
-    window.onMealInput = function(el, day, slot) {
+    window.onMealInput = function(el, dk, slot) {
       const val = el.value;
       const hasRecipe = recipes.some(r=>r.name.toLowerCase()===val.toLowerCase().trim());
       el.classList.toggle('has-recipe', hasRecipe);
@@ -440,6 +496,10 @@
         hint.style.display = hasRecipe ? 'block' : 'none';
       }
     }
+
+    window.prevWeek = function() { weekOffset--; renderMeals(); }
+    window.nextWeek = function() { weekOffset++; renderMeals(); }
+    window.goToCurrentWeek = function() { weekOffset = 0; renderMeals(); }
 
     // ─────────────────────────────────────────────────
     // MODAL: RECIPE
@@ -474,9 +534,38 @@
     window.toggleShopping = async function(id) { await toggleShoppingItem(id); }
     window.deleteShopping = async function(id) { await deleteShoppingItem(id); }
     window.clearChecked = async function() { await clearCheckedItems(); }
+    window.clearAll = async function() { await clearAllItems(); }
     window.deleteRecipeUI = async function(id) {
       if (confirm('Rezept löschen?')) await deleteRecipe(id);
     }
+
+    // TikTok: auto-fetch beim Einfügen des Links
+    async function doTikTokFetch(url) {
+      if (!url || !url.includes('tiktok')) return;
+      const status = document.getElementById('tt-fetch-status');
+      if (status) { status.textContent = '⏳ Videobeschreibung wird geladen…'; status.className='fetch-status loading'; }
+      const info = await fetchTikTokInfo(url);
+      if (info && info.title) {
+        const titleEl = document.getElementById('tt-title');
+        const ingEl = document.getElementById('tt-ingredients');
+        if (titleEl && !titleEl.value) titleEl.value = info.title;
+        if (ingEl && !ingEl.value) ingEl.value = info.title; // caption = Beschreibung mit Zutaten
+        if (status) { status.textContent = '✅ Beschreibung geladen!'; status.className='fetch-status success'; }
+        setTimeout(() => { if(status) { status.textContent=''; status.className='fetch-status'; } }, 3000);
+      } else {
+        if (status) { status.textContent = '⚠️ Keine Beschreibung gefunden – bitte manuell eingeben.'; status.className='fetch-status warn'; }
+      }
+    }
+    window.onTikTokPaste = function(event) {
+      setTimeout(() => {
+        const url = document.getElementById('tt-url')?.value.trim();
+        if (url) doTikTokFetch(url);
+      }, 100);
+    }
+    window.onTikTokBlur = function(url) {
+      if (url && url.includes('tiktok')) doTikTokFetch(url);
+    }
+
     window.addTikTokUI = async function() {
       const url = document.getElementById('tt-url').value.trim();
       const title = document.getElementById('tt-title').value.trim();
@@ -484,12 +573,13 @@
       const notes = document.getElementById('tt-notes').value.trim();
       if (!url) { alert('Bitte einen TikTok-Link einfügen!'); return; }
       ['tt-url','tt-title','tt-ingredients','tt-notes'].forEach(id=>document.getElementById(id).value='');
+      document.getElementById('tt-fetch-status').textContent='';
       await addTikTok(url, title||'TikTok Rezept', notes, ingredients);
     }
     window.deleteTikTokUI = async function(id) {
       if (confirm('TikTok-Rezept löschen?')) await deleteTikTok(id);
     }
-    window.updateMeal = async function(day, slot, value) { await setMeal(day, slot, value); }
+    window.updateMeal = async function(dk, slot, value) { await setMeal(dk, slot, value); }
 
     // ─────────────────────────────────────────────────
     // TABS
@@ -612,11 +702,20 @@
     .btn-green:hover { background:var(--green-dark); }
     .btn-ghost { background:transparent; color:var(--text2); font-size:13px; }
     .btn-outline { background:transparent; border:1.5px solid var(--primary); color:var(--primary); font-size:13px; padding:7px 14px; }
+    .btn-danger { background:#fff0f0; color:#cc3333; border:1.5px solid #ffcccc; font-size:13px; margin-top:4px; }
+    .btn-danger:active { background:#ffe0e0; }
     .btn-sm { padding:7px 14px; font-size:13px; border-radius:8px; }
     .full { width:100%; }
     .mb { margin-bottom:12px; }
+    .mb-sm { margin-bottom:8px; }
     .mt { margin-top:8px; }
     .add-btn { flex-shrink:0; padding:11px 20px; border-radius:10px; font-size:20px; line-height:1; }
+
+    /* FETCH STATUS */
+    .fetch-status { font-size:12px; min-height:18px; margin-bottom:8px; padding-left:2px; }
+    .fetch-status.loading { color:var(--text2); }
+    .fetch-status.success { color:var(--green); }
+    .fetch-status.warn { color:#e07000; }
 
     /* SHOPPING LIST */
     .category-section { margin-bottom:4px; }
@@ -681,6 +780,22 @@
     .tiktok-notes { font-size:12px; color:var(--text2); margin-bottom:5px; }
     .ingredient-preview { font-size:11px; color:var(--green); margin-bottom:6px; }
     .tiktok-actions { display:flex; gap:6px; flex-wrap:wrap; }
+
+    /* WEEK NAV */
+    .week-nav {
+      display:flex; align-items:center; justify-content:space-between;
+      padding:12px 16px; margin-bottom:10px; gap:8px;
+    }
+    .week-nav-btn {
+      background:none; border:1.5px solid var(--border); border-radius:8px;
+      width:36px; height:36px; font-size:20px; cursor:pointer;
+      display:flex; align-items:center; justify-content:center;
+      color:var(--text); flex-shrink:0; transition:background .15s;
+    }
+    .week-nav-btn:active { background:var(--bg); }
+    .week-nav-label { text-align:center; flex:1; }
+    .week-label { font-size:14px; font-weight:700; display:block; }
+    .week-range { font-size:12px; color:var(--text2); display:block; margin-top:1px; }
 
     /* MEALS */
     .meals-grid { display:flex; flex-direction:column; gap:10px; }
