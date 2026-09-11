@@ -91,6 +91,7 @@
     // ─────────────────────────────────────────────────
     function saveLocal(k,d){localStorage.setItem('foodapp_'+k,JSON.stringify(d));}
     function loadLocal(k,def=[]){try{return JSON.parse(localStorage.getItem('foodapp_'+k))||def;}catch{return def;}}
+    function genLocalId(){return crypto.randomUUID?crypto.randomUUID():Date.now()+'-'+Math.random().toString(36).slice(2);}
 
     // ─────────────────────────────────────────────────
     // FIREBASE LISTENERS
@@ -126,7 +127,7 @@
     async function addShoppingItem(name, cat, qty) {
       const item={name,cat,qty:qty||'',checked:false,createdAt:firebaseReady?serverTimestamp():Date.now()};
       if(firebaseReady) await addDoc(collection(db,'shopping'),item);
-      else{item.id=Date.now()+'';shoppingItems.push(item);saveLocal('shopping',shoppingItems);renderShopping();}
+      else{item.id=genLocalId();shoppingItems.push(item);saveLocal('shopping',shoppingItems);renderShopping();}
     }
     async function addShoppingItems(items) {
       for(const it of items) if(it.name.trim()) await addShoppingItem(it.name.trim(), it.cat||guessCategory(it.name.trim()), it.qty||'');
@@ -153,7 +154,7 @@
     async function addRecipe(name, ingredients, instructions, servings) {
       const r={name,ingredients,instructions,servings:servings||4,createdAt:firebaseReady?serverTimestamp():Date.now()};
       if(firebaseReady) await addDoc(collection(db,'recipes'),r);
-      else{r.id=Date.now()+'';recipes.push(r);saveLocal('recipes',recipes);renderRecipes();}
+      else{r.id=genLocalId();recipes.push(r);saveLocal('recipes',recipes);renderRecipes();}
     }
     async function deleteRecipe(id){
       if(firebaseReady) await deleteDoc(doc(db,'recipes',id));
@@ -166,7 +167,7 @@
     async function addReel(url,title,ingredients,notes){
       const t={url,title,ingredients,notes,createdAt:firebaseReady?serverTimestamp():Date.now()};
       if(firebaseReady) await addDoc(collection(db,'reels'),t);
-      else{t.id=Date.now()+'';reels.unshift(t);saveLocal('reels',reels);renderReels();}
+      else{t.id=genLocalId();reels.unshift(t);saveLocal('reels',reels);renderReels();}
     }
     async function deleteReel(id){
       if(firebaseReady) await deleteDoc(doc(db,'reels',id));
@@ -272,7 +273,7 @@
       if(!results.length){cont.innerHTML='<div class="search-empty">Keine Rezepte gefunden. Versuche einen anderen Begriff.</div>';return;}
       cont.innerHTML=results.slice(0,8).map(m=>`
         <div class="search-result-card">
-          <img class="search-thumb" src="${m.strMealThumb}/preview" loading="lazy" onerror="this.style.display='none'">
+          <img class="search-thumb" src="${esc(m.strMealThumb)}/preview" loading="lazy" onerror="this.style.display='none'">
           <div class="search-info">
             <div class="search-name">${esc(m.strMeal)}</div>
             <div class="search-cat">${esc(m.strCategory||'')} ${m.strArea?'· '+esc(m.strArea):''}</div>
@@ -677,7 +678,7 @@
       else if(currentTab==='reels') renderReels();
     }
 
-    function esc(str){if(!str)return '';return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+    function esc(str){if(!str)return '';return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
     window.esc=esc;
 
     document.addEventListener('keydown',e=>{
