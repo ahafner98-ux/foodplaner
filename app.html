@@ -169,6 +169,14 @@
       if(firebaseReady) await addDoc(collection(db,'reels'),t);
       else{t.id=genLocalId();reels.unshift(t);saveLocal('reels',reels);renderReels();}
     }
+    async function updateReel(id,fields){
+      if(firebaseReady) await updateDoc(doc(db,'reels',id),fields);
+      else{
+        const t=reels.find(t=>t.id===id); if(!t) return;
+        Object.assign(t,fields);
+        saveLocal('reels',reels);renderReels();
+      }
+    }
     async function deleteReel(id){
       if(firebaseReady) await deleteDoc(doc(db,'reels',id));
       else{reels=reels.filter(t=>t.id!==id);saveLocal('reels',reels);renderReels();}
@@ -501,6 +509,7 @@
           <textarea id="rl-ingredients" class="inp" placeholder="Zutaten (werden automatisch erkannt)&#10;Eine Zutat pro Zeile" rows="4"></textarea>
           <input id="rl-notes" class="inp" placeholder="Notizen (optional)" type="text">
           <button id="rl-save-btn" class="btn btn-primary full" onclick="window.addReelUI()">💾 Speichern</button>
+          <button id="rl-cancel-edit-btn" class="btn btn-ghost full mt" style="display:none" onclick="window.cancelEditReel()">✕ Bearbeitung abbrechen</button>
         </div>`;
       if(reels.length===0){
         html+=`<div class="empty-state">📲<br>Noch keine Reels gespeichert!<br><span>Füge deinen ersten Link hinzu</span></div>`;
@@ -519,6 +528,7 @@
               ${hasIng?`<div class="ingredient-preview">${esc(t.ingredients).split('\n').slice(0,3).join(' · ')}${t.ingredients.split('\n').length>3?'…':''}</div>`:''}
               <div class="reel-actions">
                 <button class="btn btn-sm btn-outline" onclick="window.open('${esc(t.url)}','_blank')">▶ Öffnen</button>
+                <button class="btn btn-sm btn-outline" onclick="window.editReelUI('${t.id}')">✏️ Bearbeiten</button>
                 <button class="btn btn-sm btn-green" onclick="window.addReelToShopping('${t.id}')">🛒 Einkauf</button>
                 <button class="btn btn-sm btn-ghost" onclick="window.deleteReelUI('${t.id}')">✕</button>
               </div>
@@ -648,23 +658,52 @@
     }
     window.onReelPaste=function(event){setTimeout(()=>{const url=document.getElementById('rl-url')?.value.trim();if(url)doReelFetch(url);},150);}
     window.onReelBlur=function(url){if(url&&(url.includes('tiktok')||url.includes('instagram')))doReelFetch(url);}
+    let editingReelId=null;
+    window.editReelUI=function(id){
+      const t=reels.find(t=>t.id===id); if(!t) return;
+      editingReelId=id;
+      document.getElementById('rl-url').value=t.url||'';
+      document.getElementById('rl-title').value=t.title||'';
+      document.getElementById('rl-ingredients').value=t.ingredients||'';
+      document.getElementById('rl-notes').value=t.notes||'';
+      document.getElementById('rl-fetch-status').textContent='';
+      const btn=document.getElementById('rl-save-btn');
+      if(btn) btn.textContent='💾 Änderungen speichern';
+      const cancelBtn=document.getElementById('rl-cancel-edit-btn');
+      if(cancelBtn) cancelBtn.style.display='block';
+      document.getElementById('rl-url').scrollIntoView({behavior:'smooth',block:'center'});
+    }
+    window.cancelEditReel=function(){
+      editingReelId=null;
+      ['rl-url','rl-title','rl-ingredients','rl-notes'].forEach(id=>document.getElementById(id).value='');
+      document.getElementById('rl-fetch-status').textContent='';
+      const btn=document.getElementById('rl-save-btn');
+      if(btn) btn.textContent='💾 Speichern';
+      const cancelBtn=document.getElementById('rl-cancel-edit-btn');
+      if(cancelBtn) cancelBtn.style.display='none';
+    }
     window.addReelUI=async function(){
       const url=document.getElementById('rl-url').value.trim();
       const title=document.getElementById('rl-title').value.trim();
       const ingredients=document.getElementById('rl-ingredients').value.trim();
       const notes=document.getElementById('rl-notes').value.trim();
       if(!url){alert('Bitte einen Link einfügen!');return;}
+      const editId=editingReelId;
       const btn=document.getElementById('rl-save-btn');
       if(btn){btn.disabled=true;btn.textContent='⏳ Speichern…';}
       try{
-        await addReel(url,title||'Reel Rezept',ingredients,notes);
+        if(editId) await updateReel(editId,{url,title:title||'Reel Rezept',ingredients,notes});
+        else await addReel(url,title||'Reel Rezept',ingredients,notes);
+        editingReelId=null;
         ['rl-url','rl-title','rl-ingredients','rl-notes'].forEach(id=>document.getElementById(id).value='');
         document.getElementById('rl-fetch-status').textContent='';
+        const cancelBtn=document.getElementById('rl-cancel-edit-btn');
+        if(cancelBtn) cancelBtn.style.display='none';
       }catch(e){
         console.error('Reel konnte nicht gespeichert werden',e);
         alert('Der Reel konnte nicht gespeichert werden. Bitte versuche es erneut.');
       }finally{
-        if(btn){btn.disabled=false;btn.textContent='💾 Speichern';}
+        if(btn){btn.disabled=false;btn.textContent=editingReelId?'💾 Änderungen speichern':'💾 Speichern';}
       }
     }
     window.deleteReelUI=async function(id){if(confirm('Eintrag löschen?'))await deleteReel(id);}
