@@ -317,13 +317,13 @@
       if(isIG)  oembedUrl=`https://www.instagram.com/api/v1/oembed/?url=${encodeURIComponent(url)}`;
 
       const proxies=[
-        u=>u, // direkt
+        u=>u, // direkt (Instagram blockiert das per CORS, daher für IG übersprungen)
         u=>`https://corsproxy.io/?${encodeURIComponent(u)}`,
         u=>`https://api.allorigins.win/get?url=${encodeURIComponent(u)}`,
       ];
-      for(const proxyFn of proxies){
+      for(const proxyFn of (isIG?proxies.slice(1):proxies)){
         try{
-          const r=await fetch(proxyFn(oembedUrl),{signal:AbortSignal.timeout(5000)});
+          const r=await fetch(proxyFn(oembedUrl),{signal:AbortSignal.timeout(3500)});
           if(!r.ok) continue;
           let d=await r.json();
           if(d.contents) d=JSON.parse(d.contents); // allorigins wraps in .contents
@@ -500,7 +500,7 @@
           <input id="rl-title" class="inp" placeholder="Rezeptname (wird automatisch geladen)" type="text">
           <textarea id="rl-ingredients" class="inp" placeholder="Zutaten (werden automatisch erkannt)&#10;Eine Zutat pro Zeile" rows="4"></textarea>
           <input id="rl-notes" class="inp" placeholder="Notizen (optional)" type="text">
-          <button class="btn btn-primary full" onclick="window.addReelUI()">💾 Speichern</button>
+          <button id="rl-save-btn" class="btn btn-primary full" onclick="window.addReelUI()">💾 Speichern</button>
         </div>`;
       if(reels.length===0){
         html+=`<div class="empty-state">📲<br>Noch keine Reels gespeichert!<br><span>Füge deinen ersten Link hinzu</span></div>`;
@@ -654,9 +654,18 @@
       const ingredients=document.getElementById('rl-ingredients').value.trim();
       const notes=document.getElementById('rl-notes').value.trim();
       if(!url){alert('Bitte einen Link einfügen!');return;}
-      ['rl-url','rl-title','rl-ingredients','rl-notes'].forEach(id=>document.getElementById(id).value='');
-      document.getElementById('rl-fetch-status').textContent='';
-      await addReel(url,title||'Reel Rezept',ingredients,notes);
+      const btn=document.getElementById('rl-save-btn');
+      if(btn){btn.disabled=true;btn.textContent='⏳ Speichern…';}
+      try{
+        await addReel(url,title||'Reel Rezept',ingredients,notes);
+        ['rl-url','rl-title','rl-ingredients','rl-notes'].forEach(id=>document.getElementById(id).value='');
+        document.getElementById('rl-fetch-status').textContent='';
+      }catch(e){
+        console.error('Reel konnte nicht gespeichert werden',e);
+        alert('Der Reel konnte nicht gespeichert werden. Bitte versuche es erneut.');
+      }finally{
+        if(btn){btn.disabled=false;btn.textContent='💾 Speichern';}
+      }
     }
     window.deleteReelUI=async function(id){if(confirm('Eintrag löschen?'))await deleteReel(id);}
 
