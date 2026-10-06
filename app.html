@@ -141,6 +141,14 @@
       if(firebaseReady) await deleteDoc(doc(db,'shopping',id));
       else{shoppingItems=shoppingItems.filter(i=>i.id!==id);saveLocal('shopping',shoppingItems);renderShopping();}
     }
+    async function updateShoppingItem(id,fields){
+      if(firebaseReady) await updateDoc(doc(db,'shopping',id),fields);
+      else{
+        const item=shoppingItems.find(i=>i.id===id); if(!item) return;
+        Object.assign(item,fields);
+        saveLocal('shopping',shoppingItems);renderShopping();
+      }
+    }
     async function clearCheckedItems(){for(const i of shoppingItems.filter(i=>i.checked)) await deleteShoppingItem(i.id);}
     async function clearAllItems(){
       if(!shoppingItems.length) return;
@@ -270,6 +278,41 @@
       }
       return lines.join('\n');
     }
+
+    // ─────────────────────────────────────────────────
+    // ÜBERSETZUNG (für importierte TheMealDB-Rezepte, EN→DE)
+    // ─────────────────────────────────────────────────
+    let translationUnavailable=false;
+    async function translateText(text, target='de', source='en') {
+      const s=(text||'').trim();
+      if(!s) return s;
+      const chunks=[];
+      let rest=s;
+      while(rest.length>450){
+        let cut=rest.lastIndexOf('. ',450);
+        if(cut<50) cut=rest.lastIndexOf(' ',450);
+        if(cut<1) cut=450;
+        chunks.push(rest.slice(0,cut+1));
+        rest=rest.slice(cut+1);
+      }
+      if(rest) chunks.push(rest);
+      const out=[];
+      for(const chunk of chunks){
+        try{
+          const r=await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(chunk)}&langpair=${source}|${target}`,{signal:AbortSignal.timeout(8000)});
+          const d=await r.json();
+          const t=d?.responseData?.translatedText||'';
+          if(!t||/MYMEMORY WARNING/i.test(t)){translationUnavailable=true;out.push(chunk);}
+          else out.push(t);
+        }catch(e){translationUnavailable=true;out.push(chunk);}
+      }
+      return out.join(' ').replace(/\s+/g,' ').trim();
+    }
+    async function translateLines(lines){
+      const out=[];
+      for(const l of lines) out.push(await translateText(l));
+      return out;
+    }
     window.searchRecipes=async function(){
       const q=document.getElementById('recipe-search').value.trim();
       if(!q) return;
@@ -285,19 +328,31 @@
           <div class="search-info">
             <div class="search-name">${esc(m.strMeal)}</div>
             <div class="search-cat">${esc(m.strCategory||'')} ${m.strArea?'· '+esc(m.strArea):''}</div>
-            <button class="btn btn-sm btn-primary mt" onclick="window.addFromMealDB('${esc(m.idMeal)}','${esc(m.strMeal)}','${esc(m.strCategory||'')}')">+ Zu meinen Rezepten</button>
+            <button class="btn btn-sm btn-primary mt" onclick="window.addFromMealDB(this,'${esc(m.idMeal)}','${esc(m.strMeal)}')">+ Zu meinen Rezepten</button>
           </div>
         </div>`).join('');
       window._mealdbCache = {};
       results.forEach(m=>{window._mealdbCache[m.idMeal]=m;});
     }
-    window.addFromMealDB=async function(id, name){
+    window.addFromMealDB=async function(btn, id, name){
       const m=window._mealdbCache?.[id];
       if(!m) return;
-      const ing=parseMealDBIngredients(m);
-      await addRecipe(name, ing, m.strInstructions||'', 4);
-      document.getElementById('recipe-results').innerHTML=`<div class="search-empty success-msg">✅ "${name}" wurde hinzugefügt!</div>`;
-      setTimeout(()=>{document.getElementById('recipe-results').innerHTML='';},2000);
+      if(btn){btn.disabled=true;btn.textContent='🌍 Übersetze…';}
+      translationUnavailable=false;
+      try{
+        const ingLines=parseMealDBIngredients(m).split('\n').filter(Boolean);
+        const nameDe=await translateText(name);
+        const ingLinesDe=await translateLines(ingLines);
+        const insDe=await translateText(m.strInstructions||'');
+        await addRecipe(nameDe||name, ingLinesDe.join('\n'), insDe||m.strInstructions||'', 4);
+        const warn=translationUnavailable?'<br><span style="font-size:12px">⚠️ Übersetzung teilweise nicht möglich – einzelne Teile auf Englisch</span>':'';
+        document.getElementById('recipe-results').innerHTML=`<div class="search-empty success-msg">✅ "${esc(nameDe||name)}" wurde hinzugefügt!${warn}</div>`;
+        setTimeout(()=>{document.getElementById('recipe-results').innerHTML='';},3000);
+      }catch(e){
+        console.error('Rezept-Import fehlgeschlagen',e);
+        alert('Das Rezept konnte nicht importiert werden. Bitte versuche es erneut.');
+        if(btn){btn.disabled=false;btn.textContent='+ Zu meinen Rezepten';}
+      }
     }
 
     // ─────────────────────────────────────────────────
@@ -391,6 +446,7 @@
               <div class="check-circle"></div>
               ${item.qty?`<span class="item-qty">${esc(item.qty)}</span>`:''}
               <span class="item-name">${esc(item.name)}</span>
+              <button class="del-btn" onclick="event.stopPropagation();window.openShoppingEditModal('${item.id}')">✏️</button>
               <button class="del-btn" onclick="event.stopPropagation();window.deleteShopping('${item.id}')">✕</button>
             </div>`;
           }
@@ -403,6 +459,7 @@
               <div class="check-circle checked">✓</div>
               ${item.qty?`<span class="item-qty">${esc(item.qty)}</span>`:''}
               <span class="item-name">${esc(item.name)}</span>
+              <button class="del-btn" onclick="event.stopPropagation();window.openShoppingEditModal('${item.id}')">✏️</button>
               <button class="del-btn" onclick="event.stopPropagation();window.deleteShopping('${item.id}')">✕</button>
             </div>`;
           }
@@ -636,6 +693,31 @@
     window.deleteShopping=async function(id){await deleteShoppingItem(id);}
     window.clearChecked=async function(){await clearCheckedItems();}
     window.clearAll=async function(){await clearAllItems();}
+
+    let editingShoppingId=null;
+    window.openShoppingEditModal=function(id){
+      const item=shoppingItems.find(i=>i.id===id); if(!item) return;
+      editingShoppingId=id;
+      document.getElementById('se-title').textContent=`Bearbeiten: ${item.name}`;
+      document.getElementById('se-qty').value=item.qty||'';
+      const cat=item.cat||'❓ Sonstiges';
+      document.getElementById('se-cat').innerHTML=CAT_LIST.map(c=>`<option value="${c}"${c===cat?' selected':''}>${c}</option>`).join('');
+      document.getElementById('shopping-edit-modal').style.display='flex';
+    }
+    window.closeShoppingEditModal=function(){
+      editingShoppingId=null;
+      document.getElementById('shopping-edit-modal').style.display='none';
+    }
+    window.saveShoppingEditModal=async function(){
+      if(!editingShoppingId) return;
+      const qty=document.getElementById('se-qty').value.trim();
+      const cat=document.getElementById('se-cat').value;
+      const id=editingShoppingId;
+      editingShoppingId=null;
+      document.getElementById('shopping-edit-modal').style.display='none';
+      try{ await updateShoppingItem(id,{qty,cat}); }
+      catch(e){ console.error('Artikel konnte nicht aktualisiert werden',e); alert('Änderungen konnten nicht gespeichert werden. Bitte versuche es erneut.'); }
+    }
     window.deleteRecipeUI=async function(id){if(confirm('Rezept löschen?'))await deleteRecipe(id);}
     window.updateMeal=async function(dk,slot,value){await setMeal(dk,slot,value);}
 
@@ -969,6 +1051,21 @@
       <div class="modal-subtitle">Tippe auf ein Rezept um es zum Wochenplan hinzuzufügen.</div>
       <div class="rp-list" id="rp-list"></div>
       <button class="btn btn-ghost full mt" onclick="closeRecipePicker()">Abbrechen</button>
+    </div>
+  </div>
+
+  <!-- MODAL: Einkaufsartikel bearbeiten -->
+  <div class="modal-overlay" id="shopping-edit-modal">
+    <div class="modal">
+      <div class="modal-handle"></div>
+      <div class="modal-title" id="se-title">Artikel bearbeiten</div>
+      <div class="modal-subtitle">Menge und Kategorie anpassen.</div>
+      <input id="se-qty" class="inp" placeholder="Menge" type="text" autocomplete="off">
+      <select id="se-cat" class="sel"></select>
+      <div class="modal-btns">
+        <button class="btn btn-primary" style="flex:1" onclick="saveShoppingEditModal()">💾 Speichern</button>
+        <button class="btn btn-ghost" onclick="closeShoppingEditModal()">Abbrechen</button>
+      </div>
     </div>
   </div>
 
