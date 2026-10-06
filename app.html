@@ -159,8 +159,8 @@
     // ─────────────────────────────────────────────────
     // RECIPE ACTIONS
     // ─────────────────────────────────────────────────
-    async function addRecipe(name, ingredients, instructions, servings) {
-      const r={name,ingredients,instructions,servings:servings||4,createdAt:firebaseReady?serverTimestamp():Date.now()};
+    async function addRecipe(name, ingredients, instructions, servings, url) {
+      const r={name,ingredients,instructions,servings:servings||4,url:url||'',createdAt:firebaseReady?serverTimestamp():Date.now()};
       if(firebaseReady) await addDoc(collection(db,'recipes'),r);
       else{r.id=genLocalId();recipes.push(r);saveLocal('recipes',recipes);renderRecipes();}
     }
@@ -344,7 +344,7 @@
         const nameDe=await translateText(name);
         const ingLinesDe=await translateLines(ingLines);
         const insDe=await translateText(m.strInstructions||'');
-        await addRecipe(nameDe||name, ingLinesDe.join('\n'), insDe||m.strInstructions||'', 4);
+        await addRecipe(nameDe||name, ingLinesDe.join('\n'), insDe||m.strInstructions||'', 4, m.strSource||'');
         const warn=translationUnavailable?'<br><span style="font-size:12px">⚠️ Übersetzung teilweise nicht möglich – einzelne Teile auf Englisch</span>':'';
         document.getElementById('recipe-results').innerHTML=`<div class="search-empty success-msg">✅ "${esc(nameDe||name)}" wurde hinzugefügt!${warn}</div>`;
         setTimeout(()=>{document.getElementById('recipe-results').innerHTML='';},3000);
@@ -389,12 +389,8 @@
       }catch(e){}
       return null;
     }
-    window.importRecipeFromUrl=async function(){
-      const url=document.getElementById('ri-url').value.trim();
-      if(!url){alert('Bitte einen Link einfügen!');return;}
-      const btn=document.getElementById('ri-import-btn');
-      const status=document.getElementById('ri-status');
-      if(btn){btn.disabled=true;btn.textContent='⏳ Lädt…';}
+    async function doRecipeUrlFetch(url){
+      const status=document.getElementById('rui-status');
       if(status){status.textContent='⏳ Rezept wird geladen…';status.className='fetch-status loading';}
       try{
         const html=await fetchCrossOrigin(url,{timeout:8000});
@@ -402,30 +398,56 @@
         const found=extractRecipeJsonLd(html);
         if(!found) throw new Error('no-recipe-data');
         const {item,lang}=found;
-        let name=(item.name||'Importiertes Rezept').trim();
+        let name=(item.name||'').trim();
         let ingLines=(item.recipeIngredient||item.ingredients||[]).map(l=>String(l).trim()).filter(Boolean);
         let instructions=normalizeRecipeInstructions(item.recipeInstructions);
         const yieldMatch=String(Array.isArray(item.recipeYield)?item.recipeYield[0]:item.recipeYield||'').match(/\d+/);
-        const servings=yieldMatch?parseInt(yieldMatch[0]):4;
+        const servings=yieldMatch?parseInt(yieldMatch[0]):null;
 
         translationUnavailable=false;
         if(lang&&lang!=='de'){
-          if(btn) btn.textContent='🌍 Übersetze…';
+          if(status){status.textContent='🌍 Übersetze…';status.className='fetch-status loading';}
           name=await translateText(name,'de',lang)||name;
           ingLines=await translateLines(ingLines,lang);
           instructions=await translateText(instructions,'de',lang)||instructions;
         }
 
-        await addRecipe(name, ingLines.join('\n'), instructions, servings);
-        const warn=translationUnavailable?' ⚠️ Übersetzung teilweise nicht möglich – einzelne Teile in Originalsprache.':'';
-        if(status){status.textContent=`✅ "${name}" wurde hinzugefügt!${warn}`;status.className='fetch-status success';}
-        document.getElementById('ri-url').value='';
-        setTimeout(()=>{if(status){status.textContent='';status.className='fetch-status';}},4000);
+        const nameEl=document.getElementById('rui-name');
+        const ingEl=document.getElementById('rui-ing');
+        const insEl=document.getElementById('rui-ins');
+        const srvEl=document.getElementById('rui-srv');
+        if(nameEl&&!nameEl.value&&name) nameEl.value=name;
+        if(ingEl&&!ingEl.value&&ingLines.length) ingEl.value=ingLines.join('\n');
+        if(insEl&&!insEl.value&&instructions) insEl.value=instructions;
+        if(srvEl&&servings) srvEl.value=servings;
+
+        const warn=translationUnavailable?' ⚠️ Teilweise nicht übersetzt.':'';
+        if(status){status.textContent=`✅ Rezept geladen – prüfen und speichern.${warn}`;status.className='fetch-status success';}
       }catch(e){
-        console.error('Rezept-Link-Import fehlgeschlagen',e);
-        if(status){status.textContent='⚠️ Rezept konnte auf dieser Seite nicht automatisch erkannt werden. Bitte manuell über "Eigenes Rezept erstellen" eintragen.';status.className='fetch-status warn';}
+        if(status){status.textContent='⚠️ Automatisch nicht möglich – bitte unten manuell eintragen.';status.className='fetch-status warn';}
+      }
+    }
+    window.onRecipeUrlPaste=function(event){setTimeout(()=>{const url=document.getElementById('rui-url')?.value.trim();if(url)doRecipeUrlFetch(url);},150);}
+    window.onRecipeUrlBlur=function(url){if(url&&url.trim())doRecipeUrlFetch(url.trim());}
+    window.saveRecipeFromUrl=async function(){
+      const url=document.getElementById('rui-url').value.trim();
+      const name=document.getElementById('rui-name').value.trim();
+      const ing=document.getElementById('rui-ing').value.trim();
+      const ins=document.getElementById('rui-ins').value.trim();
+      const srv=parseInt(document.getElementById('rui-srv').value)||4;
+      if(!url){alert('Bitte einen Link einfügen!');return;}
+      const btn=document.getElementById('rui-save-btn');
+      if(btn){btn.disabled=true;btn.textContent='⏳ Speichern…';}
+      try{
+        await addRecipe(name||'Importiertes Rezept', ing, ins, srv, url);
+        ['rui-url','rui-name','rui-ing','rui-ins'].forEach(id=>document.getElementById(id).value='');
+        document.getElementById('rui-srv').value='4';
+        document.getElementById('rui-status').textContent='';
+      }catch(e){
+        console.error('Rezept konnte nicht gespeichert werden',e);
+        alert('Das Rezept konnte nicht gespeichert werden. Bitte versuche es erneut.');
       }finally{
-        if(btn){btn.disabled=false;btn.textContent='📥';}
+        if(btn){btn.disabled=false;btn.textContent='💾 Speichern';}
       }
     }
 
@@ -574,15 +596,19 @@
       const cont=document.getElementById('tab-recipes'); if(!cont) return;
       let html=`
         <!-- REZEPT-LINK-IMPORT -->
-        <div class="card search-card">
+        <div class="add-form card">
           <div class="search-label">🔗 Rezept von einer Webseite importieren</div>
-          <div class="inp-row">
-            <input id="ri-url" class="inp" placeholder="Link zu einem Rezept einfügen…" type="url"
-              onkeydown="if(event.key==='Enter') window.importRecipeFromUrl()"
-              style="margin-bottom:0">
-            <button id="ri-import-btn" class="btn btn-primary add-btn" onclick="window.importRecipeFromUrl()">📥</button>
+          <input id="rui-url" class="inp" placeholder="Link zu einem Rezept einfügen…" type="url"
+            onpaste="window.onRecipeUrlPaste(event)" onblur="window.onRecipeUrlBlur(this.value)">
+          <div id="rui-status" class="fetch-status"></div>
+          <input id="rui-name" class="inp" placeholder="Rezeptname (wird automatisch geladen)" type="text">
+          <textarea id="rui-ing" class="inp" placeholder="Zutaten (werden automatisch erkannt)&#10;Eine Zutat pro Zeile" rows="4"></textarea>
+          <textarea id="rui-ins" class="inp" placeholder="Zubereitung (wird automatisch erkannt)" rows="3"></textarea>
+          <div class="srv-row">
+            <label>Portionen:</label>
+            <input id="rui-srv" class="inp" type="number" value="4" min="1" max="20">
           </div>
-          <div id="ri-status" class="fetch-status"></div>
+          <button id="rui-save-btn" class="btn btn-primary full" onclick="window.saveRecipeFromUrl()">💾 Speichern</button>
         </div>
         <!-- REZEPTSUCHE -->
         <div class="card search-card">
@@ -606,6 +632,7 @@
             <div class="recipe-header">
               <span class="recipe-name">${esc(r.name)}</span>
               <div class="recipe-actions">
+                ${r.url?`<button class="btn btn-sm btn-outline" onclick="window.open('${esc(r.url)}','_blank')">🔗</button>`:''}
                 <button class="btn btn-sm btn-outline" onclick="window.addRecipeToShopping('${r.id}')">🛒</button>
                 <button class="del-btn" onclick="window.deleteRecipeUI('${r.id}')">✕</button>
               </div>
