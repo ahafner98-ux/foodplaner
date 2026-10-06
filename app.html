@@ -308,9 +308,9 @@
       }
       return out.join(' ').replace(/\s+/g,' ').trim();
     }
-    async function translateLines(lines){
+    async function translateLines(lines, source='en'){
       const out=[];
-      for(const l of lines) out.push(await translateText(l));
+      for(const l of lines) out.push(await translateText(l,'de',source));
       return out;
     }
     window.searchRecipes=async function(){
@@ -356,6 +356,80 @@
     }
 
     // ─────────────────────────────────────────────────
+    // REZEPT-IMPORT VON BELIEBIGER WEBSEITE (per Link)
+    // ─────────────────────────────────────────────────
+    function normalizeRecipeInstructions(ri) {
+      if(!ri) return '';
+      if(typeof ri==='string') return ri.replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim();
+      if(Array.isArray(ri)){
+        const steps=[];
+        for(const step of ri){
+          if(typeof step==='string') steps.push(step);
+          else if(step?.text) steps.push(step.text);
+          else if(step?.itemListElement) steps.push(normalizeRecipeInstructions(step.itemListElement));
+        }
+        return steps.filter(Boolean).join('\n');
+      }
+      return '';
+    }
+    function extractRecipeJsonLd(html) {
+      try{
+        const doc=new DOMParser().parseFromString(html,'text/html');
+        const scripts=[...doc.querySelectorAll('script[type="application/ld+json"]')];
+        for(const s of scripts){
+          let data;
+          try{ data=JSON.parse(s.textContent); }catch(e){ continue; }
+          const candidates=Array.isArray(data)?data:(Array.isArray(data['@graph'])?data['@graph']:[data]);
+          for(let item of candidates){
+            if(item?.mainEntity) item=item.mainEntity;
+            const types=Array.isArray(item?.['@type'])?item['@type']:[item?.['@type']];
+            if(types.includes('Recipe')) return {item, lang:(doc.documentElement.lang||'').slice(0,2).toLowerCase()};
+          }
+        }
+      }catch(e){}
+      return null;
+    }
+    window.importRecipeFromUrl=async function(){
+      const url=document.getElementById('ri-url').value.trim();
+      if(!url){alert('Bitte einen Link einfügen!');return;}
+      const btn=document.getElementById('ri-import-btn');
+      const status=document.getElementById('ri-status');
+      if(btn){btn.disabled=true;btn.textContent='⏳ Lädt…';}
+      if(status){status.textContent='⏳ Rezept wird geladen…';status.className='fetch-status loading';}
+      try{
+        const html=await fetchCrossOrigin(url,{timeout:8000});
+        if(!html) throw new Error('fetch-failed');
+        const found=extractRecipeJsonLd(html);
+        if(!found) throw new Error('no-recipe-data');
+        const {item,lang}=found;
+        let name=(item.name||'Importiertes Rezept').trim();
+        let ingLines=(item.recipeIngredient||item.ingredients||[]).map(l=>String(l).trim()).filter(Boolean);
+        let instructions=normalizeRecipeInstructions(item.recipeInstructions);
+        const yieldMatch=String(Array.isArray(item.recipeYield)?item.recipeYield[0]:item.recipeYield||'').match(/\d+/);
+        const servings=yieldMatch?parseInt(yieldMatch[0]):4;
+
+        translationUnavailable=false;
+        if(lang&&lang!=='de'){
+          if(btn) btn.textContent='🌍 Übersetze…';
+          name=await translateText(name,'de',lang)||name;
+          ingLines=await translateLines(ingLines,lang);
+          instructions=await translateText(instructions,'de',lang)||instructions;
+        }
+
+        await addRecipe(name, ingLines.join('\n'), instructions, servings);
+        const warn=translationUnavailable?' ⚠️ Übersetzung teilweise nicht möglich – einzelne Teile in Originalsprache.':'';
+        if(status){status.textContent=`✅ "${name}" wurde hinzugefügt!${warn}`;status.className='fetch-status success';}
+        document.getElementById('ri-url').value='';
+        setTimeout(()=>{if(status){status.textContent='';status.className='fetch-status';}},4000);
+      }catch(e){
+        console.error('Rezept-Link-Import fehlgeschlagen',e);
+        if(status){status.textContent='⚠️ Rezept konnte auf dieser Seite nicht automatisch erkannt werden. Bitte manuell über "Eigenes Rezept erstellen" eintragen.';status.className='fetch-status warn';}
+      }finally{
+        if(btn){btn.disabled=false;btn.textContent='📥';}
+      }
+    }
+
+    // ─────────────────────────────────────────────────
     // INGREDIENT SCALING
     // ─────────────────────────────────────────────────
     function scaleIngredients(text, factor) {
@@ -365,6 +439,30 @@
         const rounded=Math.round(scaled*10)/10;
         return rounded%1===0?rounded.toString():rounded.toString().replace('.',',');
       });
+    }
+
+    // ─────────────────────────────────────────────────
+    // CROSS-ORIGIN FETCH (über CORS-Proxys, da reiner Client ohne eigenen Server)
+    // ─────────────────────────────────────────────────
+    async function fetchCrossOrigin(url, {skipDirect=false, timeout=5000}={}) {
+      const proxies=[
+        u=>u, // direkt (scheitert bei den meisten Fremd-Domains per CORS)
+        u=>`https://corsproxy.io/?${encodeURIComponent(u)}`,
+        u=>`https://api.allorigins.win/get?url=${encodeURIComponent(u)}`,
+      ];
+      for(const proxyFn of (skipDirect?proxies.slice(1):proxies)){
+        try{
+          const r=await fetch(proxyFn(url),{signal:AbortSignal.timeout(timeout)});
+          if(!r.ok) continue;
+          if(proxyFn===proxies[2]){
+            const d=await r.json();
+            if(d.contents!=null) return d.contents; // allorigins wraps in .contents
+            continue;
+          }
+          return await r.text();
+        }catch(e){}
+      }
+      return null;
     }
 
     // ─────────────────────────────────────────────────
@@ -379,20 +477,12 @@
       if(isTT) oembedUrl=`https://www.tiktok.com/oembed?url=${encodeURIComponent(url)}`;
       if(isIG)  oembedUrl=`https://www.instagram.com/api/v1/oembed/?url=${encodeURIComponent(url)}`;
 
-      const proxies=[
-        u=>u, // direkt (Instagram blockiert das per CORS, daher für IG übersprungen)
-        u=>`https://corsproxy.io/?${encodeURIComponent(u)}`,
-        u=>`https://api.allorigins.win/get?url=${encodeURIComponent(u)}`,
-      ];
-      for(const proxyFn of (isIG?proxies.slice(1):proxies)){
-        try{
-          const r=await fetch(proxyFn(oembedUrl),{signal:AbortSignal.timeout(3500)});
-          if(!r.ok) continue;
-          let d=await r.json();
-          if(d.contents) d=JSON.parse(d.contents); // allorigins wraps in .contents
-          if(d.title) return {title:d.title, author:d.author_name||''};
-        }catch(e){}
-      }
+      const text=await fetchCrossOrigin(oembedUrl,{skipDirect:isIG, timeout:3500});
+      if(!text) return null;
+      try{
+        const d=JSON.parse(text);
+        if(d.title) return {title:d.title, author:d.author_name||''};
+      }catch(e){}
       return null;
     }
 
@@ -483,6 +573,17 @@
     function renderRecipes(){
       const cont=document.getElementById('tab-recipes'); if(!cont) return;
       let html=`
+        <!-- REZEPT-LINK-IMPORT -->
+        <div class="card search-card">
+          <div class="search-label">🔗 Rezept von einer Webseite importieren</div>
+          <div class="inp-row">
+            <input id="ri-url" class="inp" placeholder="Link zu einem Rezept einfügen…" type="url"
+              onkeydown="if(event.key==='Enter') window.importRecipeFromUrl()"
+              style="margin-bottom:0">
+            <button id="ri-import-btn" class="btn btn-primary add-btn" onclick="window.importRecipeFromUrl()">📥</button>
+          </div>
+          <div id="ri-status" class="fetch-status"></div>
+        </div>
         <!-- REZEPTSUCHE -->
         <div class="card search-card">
           <div class="search-label">🌍 Rezept suchen & importieren</div>
